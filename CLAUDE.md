@@ -8,62 +8,106 @@ Symphony is a long-running orchestration service that polls Linear for issues, c
 
 ## Development (elixir/)
 
-All commands run from `elixir/`. Use `mise exec --` prefix if Elixir/Erlang aren't on PATH.
+All commands run from `elixir/` with `mise exec --` prefix (required — project needs Elixir 1.19 / OTP 28, see `mise.toml`).
 
 ```bash
 mise install           # install Elixir 1.19 / OTP 28 via mise
-mix setup              # install deps (alias for mix deps.get)
-mix build              # compile escript → bin/symphony
-./bin/symphony ./WORKFLOW.md   # run the service
-./bin/symphony --port 4000 ./WORKFLOW.md  # also start Phoenix dashboard
+mise exec -- mix setup              # install deps (alias for mix deps.get)
+mise exec -- mix build              # compile escript → bin/symphony
+mise exec -- ./bin/symphony ./WORKFLOW.md   # run the service
+mise exec -- ./bin/symphony --port 4000 ./WORKFLOW.md  # also start Phoenix dashboard
 ```
 
 **Quality gate (run before handoff):**
 
 ```bash
-make all               # setup + build + fmt-check + lint + coverage + dialyzer
+mise exec -- make all               # setup + build + fmt-check + lint + coverage + dialyzer
 ```
 
 Individual targets:
 
 ```bash
-mix test               # run tests
-mix test --cover       # run tests with coverage (100% threshold enforced)
-mix format             # auto-format
-mix format --check-formatted  # check formatting (CI)
-mix lint               # specs.check + credo --strict
-mix dialyzer           # type checking
-mix specs.check        # verify all public functions have @spec
-mix pr_body.check --file /path/to/pr_body.md  # validate PR body format
+mise exec -- mix test               # run tests
+mise exec -- mix test --cover       # run tests with coverage (100% threshold enforced)
+mise exec -- mix test test/symphony_elixir/orchestrator_test.exs  # single test file
+mise exec -- mix format             # auto-format
+mise exec -- mix format --check-formatted  # check formatting (CI)
+mise exec -- mix lint               # specs.check + credo --strict
+mise exec -- mix dialyzer           # type checking
+mise exec -- mix specs.check        # verify all public functions have @spec
+mise exec -- mix pr_body.check --file /path/to/pr_body.md  # validate PR body format
+mise exec -- make e2e               # live end-to-end test (SYMPHONY_RUN_LIVE_E2E=1)
 ```
 
-Run a single test file:
+**Snapshot testing:** Set `UPDATE_SNAPSHOTS=1` to regenerate dashboard snapshot fixtures.
 
-```bash
-mix test test/symphony_elixir/orchestrator_test.exs
-```
+**Test support:** `SymphonyElixir.TestSupport` (`test/support/test_support.exs`) provides a `use` macro that sets up a temp WORKFLOW.md, common aliases, and cleanup. Most tests use it.
 
 ## Architecture
 
-The Elixir OTP application (`SymphonyElixir.Application`) supervises:
+### Supervision Tree
 
-- **`Orchestrator`** (`lib/symphony_elixir/orchestrator.ex`) — GenServer that runs the polling loop. Reads `WORKFLOW.md` config via `WorkflowStore`, calls the `Tracker` to fetch Linear issues, dispatches new issues to `AgentRunner`, and reconciles completed/failed runs. Maintains concurrency limits and retry state.
+The OTP application (`SymphonyElixir.Application`, defined in `lib/symphony_elixir.ex`) starts children under a `:one_for_one` supervisor in this order:
 
-- **`AgentRunner`** (`lib/symphony_elixir/agent_runner.ex`) — Manages the lifecycle of a single issue: creates a workspace (via `Workspace`), builds the Codex prompt (via `PromptBuilder`), launches `Codex.AppServer`, and handles multi-turn retry until the issue reaches terminal state or `max_turns` is hit.
+1. **Phoenix.PubSub** (named `SymphonyElixir.PubSub`) — broadcast for LiveView dashboard
+2. **Task.Supervisor** (named `SymphonyElixir.TaskSupervisor`) — dynamic supervisor for agent tasks
+3. **WorkflowStore** — GenServer that caches and hot-reloads `WORKFLOW.md`
+4. **Orchestrator** — GenServer running the main polling and dispatch loop
+5. **HttpServer** — conditionally starts Phoenix Endpoint (returns `:ignore` if no `--port`)
+6. **StatusDashboard** — GenServer rendering a terminal ANSI dashboard (disabled in `:test` env)
 
-- **`Codex.AppServer`** (`lib/symphony_elixir/codex/`) — Subprocess wrapper for `codex app-server`. Streams JSON events from the Codex process, handles token accounting, and injects the `linear_graphql` dynamic tool so Codex can make raw Linear GraphQL calls during sessions.
+### Config Flow
 
-- **`Tracker`** / **`Linear.Client`** (`lib/symphony_elixir/tracker/`, `lib/symphony_elixir/linear/`) — Polls Linear GraphQL API. `Tracker` defines the behavior; `Linear.Client` implements it.
+Runtime config is loaded from `WORKFLOW.md` YAML front matter, **not** from Mix config files:
 
-- **`Config`** (`lib/symphony_elixir/config.ex`) — Single access point for all runtime config. Prefer adding new config reads here rather than ad-hoc env reads.
+```
+WORKFLOW.md → Workflow.load/1 (parses YAML + prompt body)
+            → WorkflowStore (caches, polls every 1s, keeps last-good on error)
+            → Config.settings!/0 (validates via Ecto embedded schema)
+            → Config.Schema (typed accessors for all config sections)
+```
 
-- **`Workflow`** / **`WorkflowStore`** (`lib/symphony_elixir/workflow.ex`, `workflow_store.ex`) — Parses `WORKFLOW.md` YAML front matter and Liquid template body. `WorkflowStore` hot-reloads config without stopping agents.
+- `$ENV_VAR` syntax in any string field resolves from the environment at load time.
+- `WorkflowStore` re-reads `WORKFLOW.md` every second. If parsing fails, it keeps the last valid config.
+- `elixir/config/config.exs` only sets Phoenix defaults (JSON lib, endpoint); all business config comes from the workflow file.
+- Ecto is used for **embedded schema validation only** — there is no database.
 
-- **`Workspace`** (`lib/symphony_elixir/workspace.ex`) — Creates and manages per-issue workspace directories under the configured root. Runs `hooks.after_create` / `hooks.before_remove` shell hooks.
+### Core Modules
 
-- **Phoenix web layer** (`lib/symphony_elixir_web/`) — Optional LiveView dashboard at `/` and JSON API at `/api/v1/*`. Enabled via `--port` flag. Uses Bandit as HTTP server.
+- **`Orchestrator`** (`lib/symphony_elixir/orchestrator.ex`) — GenServer state machine. Polls Linear via `Tracker`, dispatches issues to `AgentRunner` via `Task.Supervisor`, reconciles completed/failed/blocked runs, manages retry backoff. State tracks `running`, `claimed`, `blocked`, `completed`, and `retry_attempts` maps.
 
-**Data flow:** `Orchestrator` polls Linear → dispatches issues to `AgentRunner` → `AgentRunner` creates workspace + calls `Codex.AppServer` → Codex receives Liquid-rendered prompt + `linear_graphql` tool → Codex modifies workspace files and calls Linear → `AgentRunner` reports result back to `Orchestrator`.
+- **`AgentRunner`** (`lib/symphony_elixir/agent_runner.ex`) — Stateless module. Runs a single issue lifecycle: creates a workspace (via `Workspace`), builds the Codex prompt (via `PromptBuilder` using Liquid templates), launches `Codex.AppServer`, streams events back to the Orchestrator, and handles multi-turn retry up to `max_turns`.
+
+- **`Codex.AppServer`** (`lib/symphony_elixir/codex/app_server.ex`) — JSON-RPC 2.0 client for the `codex app-server` process over stdio. Opens a Port (local bash or remote SSH), then: `initialize` → `thread/start` → `turn/start` → event receive loop. Injects the `linear_graphql` dynamic tool. Handles approval, elicitation, and tool-call messages.
+
+- **`Tracker`** / **`Linear.Client`** (`lib/symphony_elixir/tracker.ex`, `linear/`) — `Tracker` defines the behaviour; `Linear.Client` implements it against Linear's GraphQL API. A `Memory` adapter exists for testing (`tracker/memory.ex`).
+
+- **`Config`** / **`Config.Schema`** (`lib/symphony_elixir/config.ex`, `config/schema.ex`) — Single access point for all runtime config. Schema is an Ecto embedded schema with sub-schemas for each config section (`Tracker`, `Polling`, `Workspace`, `Agent`, `Codex`, `Hooks`, `Observability`, `Server`). Prefer adding new config reads here.
+
+- **`Workflow`** / **`WorkflowStore`** (`lib/symphony_elixir/workflow.ex`, `workflow_store.ex`) — Parses `WORKFLOW.md` YAML front matter and Liquid template body. `WorkflowStore` hot-reloads config without restarting agents.
+
+- **`Workspace`** (`lib/symphony_elixir/workspace.ex`) — Creates isolated per-issue workspace directories. Supports local and SSH-remote workspaces. Runs lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`). Uses `PathSafety` to canonicalize paths and detect symlink escapes.
+
+- **`SSH`** (`lib/symphony_elixir/ssh.ex`) — Thin wrapper for remote workspace execution. Opens persistent SSH Ports for Codex app-server streaming or runs one-shot commands. SSH hosts are configured via `worker.ssh_hosts` in `WORKFLOW.md`.
+
+- **Phoenix web layer** (`lib/symphony_elixir_web/`) — Optional, enabled via `--port` flag. LiveView dashboard at `/`, JSON API at `/api/v1/state` (full snapshot), `/api/v1/:issue_identifier` (single issue), and `/api/v1/refresh` (POST, triggers a poll cycle). Real-time updates via PubSub on `"observability:dashboard"` topic.
+
+### Key Dependencies
+
+| Dep | Purpose |
+|---|---|
+| `solid` | Liquid template engine for prompt rendering |
+| `yaml_elixir` | YAML front matter parsing |
+| `ecto` | Embedded schema validation (no database) |
+| `req` | HTTP client for Linear GraphQL API |
+| `phoenix` / `phoenix_live_view` | Optional web dashboard |
+| `bandit` | Phoenix HTTP server |
+| `credo` | Elixir linter |
+| `dialyxir` | Type checking |
+
+### Data Flow
+
+`Orchestrator` polls Linear → dispatches issues to `AgentRunner` via `Task.Supervisor` → `AgentRunner` creates workspace + calls `Codex.AppServer` → Codex receives Liquid-rendered prompt + `linear_graphql` tool → Codex modifies workspace files and calls Linear → `AgentRunner` reports result back to `Orchestrator`.
 
 ## Key Conventions
 
@@ -75,6 +119,6 @@ The Elixir OTP application (`SymphonyElixir.Application`) supervises:
 
 **Docs update policy:** If behavior or config changes, update `README.md`, `elixir/README.md`, and `WORKFLOW.md` in the same PR.
 
-**Workspace safety:** Never run Codex with a cwd inside the source repo. Workspaces must stay under the configured `workspace.root`.
+**Workspace safety:** Never run Codex with a cwd inside the source repo. Workspaces must stay under the configured `workspace.root`. `PathSafety` canonicalizes paths and detects symlink escapes.
 
 **Scope:** Keep changes narrowly scoped. Follow existing module/style patterns in `lib/symphony_elixir/*`. The implementation may extend `SPEC.md` but must not conflict with it.

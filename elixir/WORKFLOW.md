@@ -1,25 +1,27 @@
 ---
 tracker:
   kind: linear
-  project_slug: "symphony-0c79b11b75ea"
+  api_key: $LINEAR_API_KEY
+  project_slug: "symphony-e625c25cdaf6"
   active_states:
     - Todo
     - In Progress
+    - In Review
     - Merging
     - Rework
   terminal_states:
+    - Done
     - Closed
     - Cancelled
     - Canceled
     - Duplicate
-    - Done
 polling:
   interval_ms: 5000
 workspace:
   root: ~/code/symphony-workspaces
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/openai/symphony .
+    git clone --depth 1 https://github.com/humphery755-dev/symphony.git .
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
@@ -29,11 +31,12 @@ agent:
   max_concurrent_agents: 10
   max_turns: 20
 codex:
-  command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+  command: $PRG_HOME/run.sh debug
   approval_policy: never
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite
+  read_timeout_ms: 60000
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

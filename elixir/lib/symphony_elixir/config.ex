@@ -114,22 +114,44 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @supported_tracker_kinds ["linear", "memory", "gitlab"]
+
   defp validate_semantics(settings) do
     cond do
       is_nil(settings.tracker.kind) ->
         {:error, :missing_tracker_kind}
 
-      settings.tracker.kind not in ["linear", "memory"] ->
+      settings.tracker.kind not in @supported_tracker_kinds ->
         {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
-        {:error, :missing_linear_api_token}
-
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
-        {:error, :missing_linear_project_slug}
-
       true ->
-        :ok
+        validate_tracker_credentials(settings)
+    end
+  end
+
+  defp validate_tracker_credentials(%{tracker: %{kind: "linear"}} = settings) do
+    validate_linear_credentials(settings)
+  end
+
+  defp validate_tracker_credentials(%{tracker: %{kind: "gitlab"}} = settings) do
+    validate_gitlab_credentials(settings)
+  end
+
+  defp validate_tracker_credentials(_settings), do: :ok
+
+  defp validate_linear_credentials(settings) do
+    cond do
+      not is_binary(settings.tracker.api_key) -> {:error, :missing_linear_api_token}
+      not is_binary(settings.tracker.project_slug) -> {:error, :missing_linear_project_slug}
+      true -> :ok
+    end
+  end
+
+  defp validate_gitlab_credentials(settings) do
+    cond do
+      not is_binary(settings.tracker.api_key) -> {:error, :missing_gitlab_token}
+      not is_binary(settings.tracker.project_slug) -> {:error, :missing_gitlab_project_id}
+      true -> :ok
     end
   end
 

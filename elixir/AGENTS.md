@@ -5,8 +5,9 @@ This directory contains the Elixir agent orchestration service that polls Linear
 ## Environment
 
 - Elixir: `1.19.x` (OTP 28) via `mise`.
-- Install deps: `mix setup`.
-- Main quality gate: `make all` (format check, lint, coverage, dialyzer).
+- All commands require `mise exec --` prefix (project needs specific Elixir/OTP versions declared in `mise.toml`).
+- Install deps: `mise exec -- mix setup`.
+- Main quality gate: `mise exec -- make all` (format check, lint, coverage, dialyzer).
 
 
 ## Codebase-Specific Conventions
@@ -29,7 +30,7 @@ This directory contains the Elixir agent orchestration service that polls Linear
 Run targeted tests while iterating, then run full gates before handoff.
 
 ```bash
-make all
+mise exec -- make all
 ```
 
 ## Required Rules
@@ -43,7 +44,7 @@ make all
 Validation command:
 
 ```bash
-mix specs.check
+mise exec -- mix specs.check
 ```
 
 ## PR Requirements
@@ -52,7 +53,7 @@ mix specs.check
 - Validate PR body locally when needed:
 
 ```bash
-mix pr_body.check --file /path/to/pr_body.md
+mise exec -- mix pr_body.check --file /path/to/pr_body.md
 ```
 
 ## Docs Update Policy
