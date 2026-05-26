@@ -32,9 +32,15 @@ case $cmd in
   debug)
     echo "*** debug ***: $@"
     #codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=xhigh -m moonshotai/kimi-k2.5 app-server
-    codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=low -m openai/gpt-5.3-codex app-server
+    codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=xhigh -m deepseek-v4-pro app-server
     ;;
+  stop)
+    pkill -f 'bin/symphony' && echo 'Symphony stopped' || echo 'No Symphony process found'
+    ;;
+
   dev)
+    echo '*** Building Symphony escript ***'
+    cd $PRG_HOME/elixir && mise exec -- mix escript.build
     cd $PRG_HOME/elixir && mise exec -- ./bin/symphony \
       --port 4000 \
       --i-understand-that-this-will-be-running-without-the-usual-guardrails \
@@ -43,11 +49,6 @@ case $cmd in
   # 未知命令
   *)
     echo "[BASH DEBUG] Entering default symphony execution" >&2
-    cd elixir || exit 1
-    mise exec -- ./bin/symphony --port 4000 --i-understand-that-this-will-be-running-without-the-usual-guardrails ./WORKFLOW.md
-    EXIT_CODE=$?
-    echo "[BASH DEBUG] Symphony finished with exit code: $EXIT_CODE" >&2
-    exit $EXIT_CODE
 esac
 _end_time=`date +%s`
 echo "本次运行时间： "$((_end_time - _start_time))"s"

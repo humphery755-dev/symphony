@@ -484,7 +484,7 @@ defmodule SymphonyElixir.Config.Schema do
       "type" => "workspaceWrite",
       "writableRoots" => [workspace],
       "readOnlyAccess" => %{"type" => "fullAccess"},
-      "networkAccess" => false,
+      "networkAccess" => true,
       "excludeTmpdirEnvVar" => false,
       "excludeSlashTmp" => false
     }
