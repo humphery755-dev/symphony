@@ -34,7 +34,7 @@ defmodule SymphonyElixir.Gitlab.Client do
 
         {:ok,
          Enum.filter(issues, fn issue ->
-           issue.labels == [] or Enum.any?(issue.labels, &MapSet.member?(state_set, String.downcase(&1)))
+           Enum.any?(issue.labels, &MapSet.member?(state_set, String.downcase(&1)))
          end)}
       end
     end
